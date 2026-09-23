@@ -46,11 +46,16 @@ on:
 
 jobs:
   deploy:
-    uses: dkmaskfa/codex-actions/.github/workflows/deploy-site.yml@v1
+    uses: MartinFaartoft/codex-actions/.github/workflows/deploy-site.yml@v1
+    permissions:
+      contents: read
+      packages: write
     secrets:
       VPS_HOST: ${{ secrets.VPS_HOST }}
       VPS_SSH_PRIVATE_KEY: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
 ```
+
+**Note on `permissions`:** the reusable workflow pushes to GHCR and requires `packages: write`. If the caller repo's default `GITHUB_TOKEN` permissions are set to "Read repository contents and packages permissions" (Settings → Actions → General → Workflow permissions), the call will fail validation with `The workflow is requesting 'packages: write', but is only allowed 'packages: read'`. Granting the permissions at the job level as shown above works regardless of repo defaults.
 
 ### 4. Set repo secrets
 
