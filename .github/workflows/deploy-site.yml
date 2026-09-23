@@ -55,19 +55,27 @@ jobs:
           DOMAIN=$(yq -r '.domain' "$MANIFEST")
           PORT=$(yq -r '.port // 80' "$MANIFEST")
           TYPE=$(yq -r '.type // "static"' "$MANIFEST")
+          EXTRA_DOMAINS=$(yq -r '.extra_domains // [] | join(",")' "$MANIFEST")
 
           # Basic validation
           [[ "$SERVICE" =~ ^[a-z][a-z0-9-]{1,31}$ ]] || { echo "::error::invalid service name: $SERVICE"; exit 1; }
           [[ "$DOMAIN" =~ ^[a-z0-9.-]+$ ]] || { echo "::error::invalid domain: $DOMAIN"; exit 1; }
           [[ "$PORT" =~ ^[0-9]+$ ]] && [[ "$PORT" -gt 0 && "$PORT" -le 65535 ]] || { echo "::error::invalid port: $PORT"; exit 1; }
           [[ "$TYPE" == "static" || "$TYPE" == "app" ]] || { echo "::error::invalid type: $TYPE"; exit 1; }
+          if [[ -n "$EXTRA_DOMAINS" ]]; then
+            IFS=',' read -ra _ARR <<< "$EXTRA_DOMAINS"
+            for d in "${_ARR[@]}"; do
+              [[ "$d" =~ ^[a-z0-9.-]+$ ]] || { echo "::error::invalid extra_domain: $d"; exit 1; }
+            done
+          fi
 
           echo "service=$SERVICE" >> "$GITHUB_OUTPUT"
           echo "domain=$DOMAIN"   >> "$GITHUB_OUTPUT"
           echo "port=$PORT"       >> "$GITHUB_OUTPUT"
           echo "type=$TYPE"       >> "$GITHUB_OUTPUT"
+          echo "extra_domains=$EXTRA_DOMAINS" >> "$GITHUB_OUTPUT"
 
-          echo "::notice::deploying service=$SERVICE domain=$DOMAIN port=$PORT type=$TYPE"
+          echo "::notice::deploying service=$SERVICE domain=$DOMAIN extra=$EXTRA_DOMAINS port=$PORT type=$TYPE"
 
       - name: Compute image reference
         id: image
@@ -112,6 +120,7 @@ jobs:
         env:
           SERVICE: ${{ steps.manifest.outputs.service }}
           DOMAIN: ${{ steps.manifest.outputs.domain }}
+          EXTRA_DOMAINS: ${{ steps.manifest.outputs.extra_domains }}
           PORT: ${{ steps.manifest.outputs.port }}
           TYPE: ${{ steps.manifest.outputs.type }}
           IMAGE: ${{ steps.image.outputs.tag }}
@@ -141,8 +150,13 @@ jobs:
           YAML
           )
 
+          HOSTS="${DOMAIN}"
+          if [[ -n "$EXTRA_DOMAINS" ]]; then
+            HOSTS="${HOSTS}, ${EXTRA_DOMAINS//,/, }"
+          fi
+
           CADDYFILE=$(cat <<CADDY
-          ${DOMAIN} {
+          ${HOSTS} {
             reverse_proxy ${SERVICE}:${PORT}
           }
           CADDY
