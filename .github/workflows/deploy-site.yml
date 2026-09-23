@@ -56,12 +56,20 @@ jobs:
           PORT=$(yq -r '.port // 80' "$MANIFEST")
           TYPE=$(yq -r '.type // "static"' "$MANIFEST")
           EXTRA_DOMAINS=$(yq -r '.extra_domains // [] | join(",")' "$MANIFEST")
+          HAS_DB=$(yq -r 'has("database")' "$MANIFEST")
+          DB_TYPE=$(yq -r '.database.type // ""' "$MANIFEST")
+          DB_VERSION=$(yq -r '.database.version // ""' "$MANIFEST")
 
           # Basic validation
           [[ "$SERVICE" =~ ^[a-z][a-z0-9-]{1,31}$ ]] || { echo "::error::invalid service name: $SERVICE"; exit 1; }
           [[ "$DOMAIN" =~ ^[a-z0-9.-]+$ ]] || { echo "::error::invalid domain: $DOMAIN"; exit 1; }
           [[ "$PORT" =~ ^[0-9]+$ ]] && [[ "$PORT" -gt 0 && "$PORT" -le 65535 ]] || { echo "::error::invalid port: $PORT"; exit 1; }
           [[ "$TYPE" == "static" || "$TYPE" == "app" ]] || { echo "::error::invalid type: $TYPE"; exit 1; }
+          if [[ "$HAS_DB" == "true" ]]; then
+            [[ "$DB_TYPE" == "postgres" ]] || { echo "::error::unsupported database.type: $DB_TYPE (only postgres)"; exit 1; }
+            [[ "$DB_VERSION" =~ ^[0-9]+(\.[0-9]+)?$ ]] || { echo "::error::invalid database.version: $DB_VERSION"; exit 1; }
+            [[ "$TYPE" == "app" ]] || { echo "::error::database requires type: app"; exit 1; }
+          fi
           if [[ -n "$EXTRA_DOMAINS" ]]; then
             IFS=',' read -ra _ARR <<< "$EXTRA_DOMAINS"
             for d in "${_ARR[@]}"; do
@@ -74,8 +82,10 @@ jobs:
           echo "port=$PORT"       >> "$GITHUB_OUTPUT"
           echo "type=$TYPE"       >> "$GITHUB_OUTPUT"
           echo "extra_domains=$EXTRA_DOMAINS" >> "$GITHUB_OUTPUT"
+          echo "has_database=$HAS_DB"         >> "$GITHUB_OUTPUT"
+          echo "db_version=$DB_VERSION"       >> "$GITHUB_OUTPUT"
 
-          echo "::notice::deploying service=$SERVICE domain=$DOMAIN extra=$EXTRA_DOMAINS port=$PORT type=$TYPE"
+          echo "::notice::deploying service=$SERVICE domain=$DOMAIN extra=$EXTRA_DOMAINS port=$PORT type=$TYPE db=$HAS_DB"
 
       - name: Compute image reference
         id: image
@@ -124,10 +134,69 @@ jobs:
           PORT: ${{ steps.manifest.outputs.port }}
           TYPE: ${{ steps.manifest.outputs.type }}
           IMAGE: ${{ steps.image.outputs.tag }}
+          HAS_DB: ${{ steps.manifest.outputs.has_database }}
+          DB_VERSION: ${{ steps.manifest.outputs.db_version }}
         run: |
           set -euo pipefail
 
-          COMPOSE=$(cat <<YAML
+          if [[ "$HAS_DB" == "true" ]]; then
+            COMPOSE=$(cat <<YAML
+          services:
+            ${SERVICE}:
+              image: ${IMAGE}
+              container_name: ${SERVICE}
+              restart: unless-stopped
+              networks:
+                - web
+                - internal
+              expose:
+                - "${PORT}"
+              env_file:
+                - .env
+              environment:
+                ASPNETCORE_URLS: "http://+:${PORT}"
+                ConnectionStrings__Default: "Host=db;Port=5432;Database=${SERVICE};Username=${SERVICE};Password=\${DB_PASSWORD}"
+              depends_on:
+                db:
+                  condition: service_healthy
+              healthcheck:
+                test: ["CMD", "curl", "-fsS", "http://localhost:${PORT}/healthz"]
+                interval: 5s
+                timeout: 3s
+                retries: 12
+                start_period: 10s
+            db:
+              image: postgres:${DB_VERSION}
+              container_name: ${SERVICE}-db
+              restart: unless-stopped
+              networks:
+                - internal
+              env_file:
+                - .env
+              environment:
+                POSTGRES_DB: ${SERVICE}
+                POSTGRES_USER: ${SERVICE}
+                POSTGRES_PASSWORD: \${DB_PASSWORD}
+              volumes:
+                - pgdata:/var/lib/postgresql/data
+              healthcheck:
+                test: ["CMD-SHELL", "pg_isready -U ${SERVICE} -d ${SERVICE}"]
+                interval: 5s
+                timeout: 3s
+                retries: 20
+
+          networks:
+            web:
+              external: true
+            internal:
+              driver: bridge
+
+          volumes:
+            pgdata:
+          YAML
+          )
+          else
+            COMPOSE=$(cat <<YAML
           services:
             ${SERVICE}:
               image: ${IMAGE}
@@ -149,6 +218,7 @@ jobs:
               external: true
           YAML
           )
+          fi
 
           HOSTS="${DOMAIN}"
           if [[ -n "$EXTRA_DOMAINS" ]]; then
@@ -165,7 +235,6 @@ jobs:
           COMPOSE_B64=$(printf '%s' "$COMPOSE" | base64 -w0)
           CADDY_B64=$(printf '%s' "$CADDYFILE" | base64 -w0)
 
-          # Emit as multiline outputs
           {
             echo "compose_b64=$COMPOSE_B64"
             echo "caddyfile_b64=$CADDY_B64"
@@ -194,11 +263,15 @@ jobs:
           DOMAIN: ${{ steps.manifest.outputs.domain }}
           PORT: ${{ steps.manifest.outputs.port }}
           TYPE: ${{ steps.manifest.outputs.type }}
+          HAS_DB: ${{ steps.manifest.outputs.has_database }}
           IMAGE: ${{ steps.image.outputs.tag }}
           COMPOSE_B64: ${{ steps.render.outputs.compose_b64 }}
           CADDYFILE_B64: ${{ steps.render.outputs.caddyfile_b64 }}
         run: |
           set -euo pipefail
+
+          HAS_DB_JSON=false
+          [[ "$HAS_DB" == "true" ]] && HAS_DB_JSON=true
 
           PAYLOAD=$(jq -n \
             --arg service "$SERVICE" \
@@ -206,9 +279,10 @@ jobs:
             --arg domain "$DOMAIN" \
             --argjson port "$PORT" \
             --arg type "$TYPE" \
+            --argjson has_database "$HAS_DB_JSON" \
             --arg compose "$COMPOSE_B64" \
             --arg caddyfile "$CADDYFILE_B64" \
-            '{version:1, service:$service, image:$image, domain:$domain, port:$port, type:$type, compose:$compose, caddyfile:$caddyfile}')
+            '{version:1, service:$service, image:$image, domain:$domain, port:$port, type:$type, has_database:$has_database, compose:$compose, caddyfile:$caddyfile}')
 
           echo "$PAYLOAD" | jq -c 'del(.compose, .caddyfile) + {compose:"<b64>", caddyfile:"<b64>"}'
 
