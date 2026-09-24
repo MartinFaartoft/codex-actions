@@ -156,6 +156,10 @@ jobs:
               environment:
                 ASPNETCORE_URLS: "http://+:${PORT}"
                 ConnectionStrings__Default: "Host=db;Port=5432;Database=${SERVICE};Username=${SERVICE};Password=\${DB_PASSWORD}"
+                OTEL_EXPORTER_OTLP_ENDPOINT: "http://alloy:4318"
+                OTEL_EXPORTER_OTLP_PROTOCOL: "http/protobuf"
+                OTEL_SERVICE_NAME: "${SERVICE}"
+                OTEL_RESOURCE_ATTRIBUTES: "service.instance.id=${IMAGE},deployment.environment=prod"
               depends_on:
                 db:
                   condition: service_healthy
